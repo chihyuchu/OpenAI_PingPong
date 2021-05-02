@@ -44,7 +44,6 @@ plt.ion()
 os.environ["KMP_DUPLICATE_LIB_OK"]  =  "TRUE"
 
 
-# ----------------Setup Environment------------------
 """
 Parameters:
     1. BATCH_SIZE: define the batch size sampled from replay memory
@@ -52,7 +51,7 @@ Parameters:
     3. EPS: probability of random action, start with higher prob and decay
     4. TARGET_UPDATE: the update freq for target net (per $TARGET_UPDATE eposide)
 """
-BATCH_SIZE = 512
+BATCH_SIZE = 128
 GAMMA = 0.999
 EPS_START = 0.9
 EPS_END = 0.05
@@ -98,7 +97,7 @@ class ReplayMemory(object):
 """
 Define Deep Q-Learning Network object
 """
-    
+ 
 class DQN(nn.Module):
 
     def __init__(self, h, w, outputs):
@@ -128,10 +127,17 @@ class DQN(nn.Module):
         return self.head(x.view(x.size(0), -1))
     
 
-# Define resize object
+""" 
+Define resize object and use to down scaling the input image into 40 x 40 x 3
+"""
+
 resize = T.Compose([T.ToPILImage(),
                     T.Resize(40, interpolation=Image.CUBIC),
                     T.ToTensor()])
+
+"""
+Define get_screen function and return the current screen as torch tensor (be feed into GPU)
+"""
 
 def get_screen():
     # Returned screen requested by gym is 160x210x3
@@ -151,17 +157,13 @@ def get_screen():
     return resize(screen).unsqueeze(0).to(device)
 
 
+"""
+Initializing:
+Get screen size so that we can initialize layers correctly based on shape
+returned from AI gym. Typical dimensions at this point are close to 3x40x90
+which is the result of a clamped and down-scaled render buffer in get_screen()
+"""
 env.reset()
-plt.figure()
-plt.imshow(get_screen().cpu().squeeze(0).permute(1, 2, 0).numpy(),
-           interpolation='none')
-plt.title('Example extracted screen')
-plt.show()
-
-
-# Get screen size so that we can initialize layers correctly based on shape
-# returned from AI gym. Typical dimensions at this point are close to 3x40x90
-# which is the result of a clamped and down-scaled render buffer in get_screen()
 init_screen = get_screen()
 _, _, screen_height, screen_width = init_screen.shape
 
@@ -195,19 +197,19 @@ def select_action(state):
         return torch.tensor([[random.randrange(n_actions)]], device=device, dtype=torch.long)
 
 
-episode_durations = []
+episode_rewards = []
 
-def plot_durations():
-    plt.figure(2)
+def plot_rewards():
+    plt.figure(1)
     plt.clf()
-    durations_t = torch.tensor(episode_durations, dtype=torch.float)
+    rewards_t = torch.tensor(episode_rewards, dtype=torch.float)
     plt.title('Training...')
     plt.xlabel('Episode')
-    plt.ylabel('Duration')
-    plt.plot(durations_t.numpy())
+    plt.ylabel('Rewards')
+    plt.plot(rewards_t.numpy())
     # Take 100 episode averages and plot them too
-    if len(durations_t) >= 100:
-        means = durations_t.unfold(0, 100, 1).mean(1).view(-1)
+    if len(rewards_t) >= 100:
+        means = rewards_t.unfold(0, 100, 1).mean(1).view(-1)
         means = torch.cat((torch.zeros(99), means))
         plt.plot(means.numpy())
 
@@ -215,9 +217,8 @@ def plot_durations():
     if is_ipython:
         display.clear_output(wait=True)
         display.display(plt.gcf())
-        
-        
-#%% Training Loop
+
+# ----------------Training section: setup and loop ------------------
 
 def optimize_model():
     if len(memory) < BATCH_SIZE:
@@ -265,10 +266,15 @@ def optimize_model():
         param.grad.data.clamp_(-1, 1)
     optimizer.step()
     
-    
+"""
+Training loop:
+As the reference paper, we would like to achieve at least 20 rewards 
+(a.k.a win all matches!) just in "100" episodes!
+"""
 num_episodes = 100
 for i_episode in range(num_episodes):
     # Initialize the environment and state
+    cumulative_reward = 0
     env.reset()
     last_screen = get_screen()
     current_screen = get_screen()
@@ -296,20 +302,25 @@ for i_episode in range(num_episodes):
         # render the screen to monitor the states
         env.render()
         
+        # cumulative reward
+        cumulative_reward += reward.item()
+        
         # Perform one step of the optimization (on the target network)
         optimize_model()
         
         if done:
-            episode_durations.append(t + 1)
+            episode_rewards.append(cumulative_reward)
             break
     # Update the target network, copying all weights and biases in DQN
     if i_episode % TARGET_UPDATE == 0:
         target_net.load_state_dict(policy_net.state_dict())
-        
+    
+    # Plot total reward (R_0) per eposode
+    plot_rewards()
+    
     print(i_episode, "th episode complete...")
 
 print('Complete')
-env.render()
 env.close()
 plt.ioff()
 plt.show()

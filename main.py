@@ -3,9 +3,6 @@
 Created on Tue Feb 23 23:36:34 2021
 
 @author: Zhu Zhi Yu
-
-This project is based on the template of gym: CartPole
-
 """
 import gym
 import math
@@ -23,22 +20,20 @@ import torch.optim as optim
 import torch.nn.functional as F
 import torchvision.transforms as T
 import os
-# setup environment
 
-import atari_py
-from atari_env import AtariEnv
-env_name = "Pong_v0"
-env = AtariEnv(obs_type='image')
+# ----------------Setup Environment------------------
+"""
+Applying gym environment for Atari game: Pong_v0
+This game is relatively difficult to training since the reward feed back only after a match is over
+"""
+env_name = "Pong-v0"
+env = gym.make(env_name).unwrapped
 
 print("Observation space", env.observation_space)
 
 
 # if gpu is to be used
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-Transition = namedtuple('Transition',
-                        ('state', 'action', 'next_state', 'reward'))
 
 # set up matplotlib
 is_ipython = 'inline' in matplotlib.get_backend()
@@ -46,12 +41,41 @@ if is_ipython:
     from IPython import display
 
 plt.ion()
-
 os.environ["KMP_DUPLICATE_LIB_OK"]  =  "TRUE"
 
 
-class ReplayMemory(object):
+# ----------------Setup Environment------------------
+"""
+Parameters:
+    1. BATCH_SIZE: define the batch size sampled from replay memory
+    2. GAMMA: the constant weight of N-1 th Q function
+    3. EPS: probability of random action, start with higher prob and decay
+    4. TARGET_UPDATE: the update freq for target net (per $TARGET_UPDATE eposide)
+"""
+BATCH_SIZE = 512
+GAMMA = 0.999
+EPS_START = 0.9
+EPS_END = 0.05
+EPS_DECAY = 200
+TARGET_UPDATE = 10
 
+
+
+"""
+Transition - a named tuple representing a single transition in our environment. 
+It essentially maps (state, action) pairs to their (next_state, reward) result, 
+with the state being the screen difference image as described later on.
+"""
+
+Transition = namedtuple('Transition',
+                        ('state', 'action', 'next_state', 'reward'))
+
+"""
+ReplayMemory - a cyclic buffer of bounded size that holds the transitions observed recently. 
+It also implements a .sample() method for selecting a random batch of transitions for training.
+"""
+
+class ReplayMemory(object):
     def __init__(self, capacity):
         self.capacity = capacity
         self.memory = []
@@ -69,6 +93,11 @@ class ReplayMemory(object):
 
     def __len__(self):
         return len(self.memory)
+    
+
+"""
+Define Deep Q-Learning Network object
+"""
     
 class DQN(nn.Module):
 
@@ -98,29 +127,43 @@ class DQN(nn.Module):
         x = F.relu(self.bn3(self.conv3(x)))
         return self.head(x.view(x.size(0), -1))
     
-    
+
+# Define resize object
 resize = T.Compose([T.ToPILImage(),
                     T.Resize(40, interpolation=Image.CUBIC),
                     T.ToTensor()])
 
+def get_screen():
+    # Returned screen requested by gym is 160x210x3
+    screen = env.render(mode='rgb_array').transpose((2, 0, 1))
+    
+    # Get the screen height and width
+    _, screen_height, screen_width = screen.shape
+    
+    # Cut off the unnecessary part
+    screen = screen[:, int(screen_height * 0.165):int(screen_height * 0.92)]
+
+    # Convert to float, rescale, convert to torch tensor
+    # (this doesn't require a copy)
+    screen = np.ascontiguousarray(screen, dtype=np.float32) / 255
+    screen = torch.from_numpy(screen)
+    # Resize, and add a batch dimension (BCHW)
+    return resize(screen).unsqueeze(0).to(device)
+
+
 env.reset()
 plt.figure()
-plt.imshow(env._get_obs(),
+plt.imshow(get_screen().cpu().squeeze(0).permute(1, 2, 0).numpy(),
            interpolation='none')
 plt.title('Example extracted screen')
 plt.show()
 
-#%% Training
 
-BATCH_SIZE = 128
-GAMMA = 0.999
-EPS_START = 0.9
-EPS_END = 0.05
-EPS_DECAY = 200
-TARGET_UPDATE = 10
-
-init_screen = env._get_obs()
-screen_height, screen_width, screen_channel = init_screen.shape
+# Get screen size so that we can initialize layers correctly based on shape
+# returned from AI gym. Typical dimensions at this point are close to 3x40x90
+# which is the result of a clamped and down-scaled render buffer in get_screen()
+init_screen = get_screen()
+_, _, screen_height, screen_width = init_screen.shape
 
 # Get number of actions from gym action space
 n_actions = env.action_space.n
@@ -132,6 +175,7 @@ target_net.eval()
 
 optimizer = optim.RMSprop(policy_net.parameters())
 memory = ReplayMemory(10000)
+
 
 steps_done = 0
 
@@ -146,28 +190,88 @@ def select_action(state):
             # t.max(1) will return largest column value of each row.
             # second column on max result is index of where max element was
             # found, so we pick action with the larger expected reward.
-            return policy_net(torch.tensor(state).reshape((1,\
-                                                        screen_channel,\
-                                                        screen_height,\
-                                                        screen_width))/255).max(1)[1].view(1, 1)
+            return policy_net(state).max(1)[1].view(1, 1)
     else:
         return torch.tensor([[random.randrange(n_actions)]], device=device, dtype=torch.long)
 
 
 episode_durations = []
-      
+
+def plot_durations():
+    plt.figure(2)
+    plt.clf()
+    durations_t = torch.tensor(episode_durations, dtype=torch.float)
+    plt.title('Training...')
+    plt.xlabel('Episode')
+    plt.ylabel('Duration')
+    plt.plot(durations_t.numpy())
+    # Take 100 episode averages and plot them too
+    if len(durations_t) >= 100:
+        means = durations_t.unfold(0, 100, 1).mean(1).view(-1)
+        means = torch.cat((torch.zeros(99), means))
+        plt.plot(means.numpy())
+
+    plt.pause(0.001)  # pause a bit so that plots are updated
+    if is_ipython:
+        display.clear_output(wait=True)
+        display.display(plt.gcf())
+        
         
 #%% Training Loop
 
 def optimize_model():
-   return None
+    if len(memory) < BATCH_SIZE:
+        return
     
-num_episodes = 50
+    transitions = memory.sample(BATCH_SIZE)
+    # Transpose the batch (see https://stackoverflow.com/a/19343/3343043 for
+    # detailed explanation). This converts batch-array of Transitions
+    # to Transition of batch-arrays.
+    batch = Transition(*zip(*transitions))
+
+    # Compute a mask of non-final states and concatenate the batch elements
+    # (a final state would've been the one after which simulation ended)
+    non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
+                                          batch.next_state)), device=device, dtype=torch.bool)
+    non_final_next_states = torch.cat([s for s in batch.next_state
+                                                if s is not None])
+    state_batch = torch.cat(batch.state)
+    action_batch = torch.cat(batch.action)
+    reward_batch = torch.cat(batch.reward)
+
+    # Compute Q(s_t, a) - the model computes Q(s_t), then we select the
+    # columns of actions taken. These are the actions which would've been taken
+    # for each batch state according to policy_net
+    state_action_values = policy_net(state_batch).gather(1, action_batch)
+
+    # Compute V(s_{t+1}) for all next states.
+    # Expected values of actions for non_final_next_states are computed based
+    # on the "older" target_net; selecting their best reward with max(1)[0].
+    # This is merged based on the mask, such that we'll have either the expected
+    # state value or 0 in case the state was final.
+    next_state_values = torch.zeros(BATCH_SIZE, device=device)
+    next_state_values[non_final_mask] = target_net(non_final_next_states).max(1)[0].detach()
+    # Compute the expected Q values
+    expected_state_action_values = (next_state_values * GAMMA) + reward_batch
+
+    # Compute Huber loss
+    loss = F.smooth_l1_loss(state_action_values, 
+                            expected_state_action_values.unsqueeze(1))
+
+    # Optimize the model
+    optimizer.zero_grad()
+    loss.backward()
+    for param in policy_net.parameters():
+        param.grad.data.clamp_(-1, 1)
+    optimizer.step()
+    
+    
+num_episodes = 100
 for i_episode in range(num_episodes):
     # Initialize the environment and state
     env.reset()
-    last_screen = env._get_obs()
-    current_screen = env._get_obs()
+    last_screen = get_screen()
+    current_screen = get_screen()
     state = current_screen - last_screen
     for t in count():
         # Select and perform an action
@@ -177,7 +281,7 @@ for i_episode in range(num_episodes):
 
         # Observe new state
         last_screen = current_screen
-        current_screen = env._get_obs()
+        current_screen = get_screen()
         if not done:
             next_state = current_screen - last_screen
         else:
@@ -188,17 +292,21 @@ for i_episode in range(num_episodes):
 
         # Move to the next state
         state = next_state
-
+        
+        # render the screen to monitor the states
+        env.render()
+        
         # Perform one step of the optimization (on the target network)
         optimize_model()
         
         if done:
             episode_durations.append(t + 1)
-            plot_durations()
             break
     # Update the target network, copying all weights and biases in DQN
     if i_episode % TARGET_UPDATE == 0:
         target_net.load_state_dict(policy_net.state_dict())
+        
+    print(i_episode, "th episode complete...")
 
 print('Complete')
 env.render()
